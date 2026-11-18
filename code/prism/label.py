@@ -29,7 +29,7 @@ DESCRIPTIONS: dict[str, list[str]] = {
                "punching an opponent wearing boxing gloves"],
     "horse": ["horseback riding", "riding a horse with its head and mane in view",
               "riding a horse along a trail"],
-    "jumping": ["skydiving in freefall", "parachuting from an airplane", "bungee jumping",
+    "jumping": ["skydiving in freefall", "parachuting under a canopy", "bungee jumping",
                 "base jumping off a cliff", "cliff jumping into water"],
     "longboarding": ["longboarding downhill on a road", "riding a longboard skateboard down a hill"],
     "motor": ["riding a motorcycle", "a motorcycle ride on a road", "riding a dirt bike motocross"],

@@ -4,9 +4,8 @@
   # everything, caching features so later re-runs (new head / thresholds) take seconds
   python code/tools/run_all.py --videos data/EPIC-KITCHENS data/fpvsum
 
-  # split across 2 processes on one GPU (decode is often the bottleneck)
-  python code/tools/run_all.py --videos ... --shard 0/2 &
-  python code/tools/run_all.py --videos ... --shard 1/2 &
+  # 3 parallel worker processes sharing one GPU (decode overlaps with inference)
+  python code/tools/run_all.py --videos data --workers 3
 
   # rebuild all JSONs from cached features only (no video needed)
   python code/tools/run_all.py --from-cache --overwrite
@@ -39,6 +38,32 @@ def index_videos(dirs):
     return idx
 
 
+def spawn_workers(a) -> int:
+    """Re-launch this script as N shard processes; longest videos are spread evenly."""
+    import subprocess
+
+    args = [x for x in sys.argv[1:]]
+    for flag in ("--workers", "--shard"):
+        while flag in args:
+            i = args.index(flag)
+            del args[i:i + 2]
+    procs = []
+    for i in range(a.workers):
+        log = Path(a.out) / f"_worker{i}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(log, "w")
+        env = {**__import__("os").environ, "PRISM_WORKERS": str(a.workers)}
+        procs.append((subprocess.Popen([sys.executable, __file__, *args, "--shard", f"{i}/{a.workers}"],
+                                       stdout=fh, stderr=subprocess.STDOUT, env=env), fh, log))
+        print(f"worker {i}: pid {procs[-1][0].pid}, log {log}")
+    rc = 0
+    for p, fh, log in procs:
+        rc |= p.wait()
+        fh.close()
+        print(f"{log.name}: " + (log.read_text().strip().splitlines() or ["(empty)"])[-1])
+    return rc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", default=str(ROOT / "package" / "manifest.csv"))
@@ -51,10 +76,15 @@ def main():
     ap.add_argument("--only", choices=["epic_kitchens_100", "fpvsum"], default=None)
     ap.add_argument("--ids", default=None, help="comma-separated subset of video ids")
     ap.add_argument("--shard", default="0/1", help="i/n: process every n-th video starting at i")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="spawn this many shard processes in parallel (each loads its own models; "
+                         "~3 GB VRAM each with CLIP-L + Omnivore fp16; 2-3 suits a 12 GB card)")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--from-cache", action="store_true", help="use cached features only; skip videos without")
     a = ap.parse_args()
 
+    if a.workers > 1:
+        sys.exit(spawn_workers(a))
     cfg_path = a.config or (ROOT / "configs" / "submission.json")
     cfg = Config.load(cfg_path if Path(cfg_path).exists() else None, team_id=a.team_id, device=a.device)
     with open(a.manifest) as fh:
@@ -65,6 +95,7 @@ def main():
         keep = set(a.ids.split(","))
         rows = [r for r in rows if r["video_id"] in keep]
     i, n = map(int, a.shard.split("/"))
+    rows.sort(key=lambda r: -float(r["duration_sec"]))  # longest first: balanced shards, early ETA
     rows = rows[i::n]
     out_dir = Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -26,13 +26,28 @@ class FeatureExtractor:
     def __init__(self, cfg: Config, device: str, omnivore=None, clip=None):
         self.cfg, self.device = cfg, device
         self.omni, self.clip = omnivore, clip
+        self.batch = cfg.resolve_batch(device)
 
     # ------------------------------------------------------------------------------
     def _run_omni(self, batch: list[np.ndarray]):
+        try:
+            return self._forward(batch)
+        except torch.cuda.OutOfMemoryError:
+            if len(batch) == 1:
+                raise
+            torch.cuda.empty_cache()
+            self.batch = max(1, len(batch) // 2)  # remember the smaller size for later batches
+            h = len(batch) // 2
+            f1, l1 = self._run_omni(batch[:h])
+            f2, l2 = self._run_omni(batch[h:])
+            return np.concatenate([f1, f2]), np.concatenate([l1, l2])
+
+    def _forward(self, batch: list[np.ndarray]):
         x = torch.from_numpy(np.stack(batch)).to(self.device, non_blocking=True)
         use_amp = self.device.startswith("cuda") and self.cfg.fp16
-        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp) if use_amp else _null():
-            feat, logits = self.omni(x)
+        with torch.inference_mode():
+            with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp) if use_amp else _null():
+                feat, logits = self.omni(x)
         return feat.float().cpu().numpy(), logits.float().cpu().numpy()
 
     def extract(self, video_path: str, with_omni: bool = True, log=print) -> dict:
@@ -89,7 +104,7 @@ class FeatureExtractor:
                 keep_from = min(next_start, idx - T + 2)  # always keep the last T frames for the tail window
                 for i in [i for i in buf if i < keep_from]:
                     del buf[i]
-                if len(o_batch) >= cfg.batch_size:
+                if len(o_batch) >= self.batch:
                     flush_omni()
         flush_clip()
 

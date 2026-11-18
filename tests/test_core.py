@@ -237,3 +237,25 @@ def test_feature_short_video(tmp_path):
     fx = FeatureExtractor(Config(), "cpu", omnivore=_FakeOmni(), clip=_FakeClip())
     f = fx.extract(str(p), log=lambda *a: None)
     assert len(f["win_center"]) == 1 and f["omni_logits"].shape == (1, 3806)
+
+
+# ---------------------------------------------------------------- local scorer
+def test_evaluate_metrics_sanity():
+    from evaluate import action_map, coverage, highlight_f1, label_accuracy
+
+    gt = {"v": [(10.0, 12.0, "take", "plate"), (20.0, 25.0, "wash", "tap"), (40.0, 41.0, "take", "plate")]}
+    perfect = {"v": [{"segment": [s, e], "verb": a, "noun": b, "score": 0.9} for s, e, a, b in gt["v"]]}
+    assert action_map(perfect, gt)[0] == pytest.approx(1.0)
+    shifted = {"v": [{"segment": [s + 1.5, e + 1.5], "verb": a, "noun": b, "score": 0.9} for s, e, a, b in gt["v"]]}
+    m, per = action_map(shifted, gt)
+    assert per[0.5] < 1.0 and m < 1.0
+    objs = {"v": {"duration_sec": 100.0, "highlights": [{"segment": [9.0, 13.0]}, {"segment": [20.0, 26.0]}]}}
+    assert coverage(objs, gt, "mid") == pytest.approx(1.0)  # 2 distinct pairs, both captured
+    objs2 = {"v": {"duration_sec": 100.0, "highlights": [{"segment": [9.0, 13.0]}]}}
+    assert coverage(objs2, gt, "mid") == pytest.approx(0.5)
+    binary = np.zeros(1000, bool)
+    binary[100:250] = True
+    fg = {"Ski_x": (binary.astype(float), binary)}
+    o = {"Ski_x": {"duration_sec": 100.0, "label": {"name": "ski"}, "highlights": [{"segment": [10.0, 25.0]}]}}
+    assert highlight_f1(o, fg, ["Ski_x"]) > 0.98
+    assert label_accuracy(o, ["Ski_x"]) == 1.0

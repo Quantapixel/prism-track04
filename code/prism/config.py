@@ -24,13 +24,13 @@ class Config:
     # ---- decoding -------------------------------------------------------------------
     decode_fps: float = 15.0  # Omnivore-EPIC was trained on 32 frames @ 15 fps (30 fps, rate 2)
     frame_size: int = 224  # short side resize + centre crop
-    hwaccel: str = ""  # e.g. "cuda" to let ffmpeg decode on the GPU
+    hwaccel: str = "auto"  # "auto" = NVDEC (cuda) when available, else CPU; "" forces CPU
 
     # ---- Omnivore sliding window ------------------------------------------------------
     omni_weights: str = "omnivore_swinB_epic.torch"
     clip_frames: int = 32  # frames per window (2.13 s at 15 fps)
     window_stride_s: float = 0.5  # stride between window starts
-    batch_size: int = 8
+    batch_size: int = 0  # windows per Omnivore pass; 0 = auto (1 on CPU, from VRAM on GPU)
     skip_omnivore_if_not_cooking: bool = True  # key-frame CLIP pre-check; FPV videos skip Omnivore
 
     # ---- CLIP (label + FPV importance) -------------------------------------------------
@@ -105,6 +105,18 @@ class Config:
             if v is not None:
                 setattr(cfg, k, v)
         return cfg
+
+    def resolve_batch(self, device: str) -> int:
+        """Each Swin-B window needs ~1.45 GB in fp32 (measured) / ~1.2 GB budgeted in fp16."""
+        if self.batch_size > 0:
+            return self.batch_size
+        if not device.startswith("cuda"):
+            return 1
+        import torch
+
+        total = torch.cuda.get_device_properties(torch.device(device)).total_memory / 2**30
+        workers = max(1, int(os.environ.get("PRISM_WORKERS", "1")))
+        return max(1, min(12, int((total / workers - 2.0) / 1.2)))
 
     def resolve_device(self) -> str:
         if self.device:

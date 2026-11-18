@@ -25,6 +25,7 @@ def main():
     ap.add_argument("--list", default=str(ROOT / "data" / "annotations" / "FPVSum_videolist.csv"))
     ap.add_argument("--out", default=str(ROOT / "data" / "fpvsum"))
     ap.add_argument("--cookies-from-browser", default=None, help="e.g. firefox, if YouTube asks to sign in")
+    ap.add_argument("--jobs", type=int, default=4, help="videos downloaded in parallel")
     a = ap.parse_args()
     exe = shutil.which("yt-dlp") or None
     cmd0 = [exe] if exe else [sys.executable, "-m", "yt_dlp"]
@@ -35,22 +36,29 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     failed = []
-    for vid in ids:
+
+    def fetch(vid):
         dst = out / f"{vid}.mp4"
         if dst.exists() and dst.stat().st_size > 0:
-            print(f"have {vid}")
-            continue
+            return vid, True, "have"
         if vid not in yt:
-            print(f"!! {vid} not in FPVSum_videolist.csv")
-            failed.append(vid)
-            continue
-        cmd = cmd0 + ["-f", FORMAT, "--merge-output-format", "mp4", "--no-playlist",
-                      "-o", str(out / f"{vid}.%(ext)s"), f"https://www.youtube.com/watch?v={yt[vid]}"]
+            return vid, False, "not in FPVSum_videolist.csv"
+        cmd = cmd0 + ["-q", "--no-warnings", "-N", "4", "-f", FORMAT, "--merge-output-format", "mp4",
+                      "--no-playlist", "-o", str(out / f"{vid}.%(ext)s"),
+                      f"https://www.youtube.com/watch?v={yt[vid]}"]
         if a.cookies_from_browser:
             cmd[1:1] = ["--cookies-from-browser", a.cookies_from_browser]
-        print("get ", vid)
-        if subprocess.run(cmd).returncode != 0 or not dst.exists():
-            failed.append(vid)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        ok = r.returncode == 0 and dst.exists()
+        return vid, ok, "got" if ok else (r.stderr.strip().splitlines() or ["failed"])[-1]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
+        for vid, ok, msg in ex.map(fetch, ids):
+            print(f"{'ok  ' if ok else '!!  '}{vid}: {msg}", flush=True)
+            if not ok:
+                failed.append(vid)
     print(f"{len(ids) - len(failed)}/{len(ids)} present in {out}")
     if failed:
         print("failed:", ",".join(failed))

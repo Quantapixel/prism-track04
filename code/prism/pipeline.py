@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -20,8 +21,13 @@ class Pipeline:
 
         self.cfg, self.log = cfg, log
         self.device = cfg.resolve_device()
-        if self.device == "cpu":
-            torch.set_num_threads(max(1, torch.get_num_threads()))
+        threads = os.environ.get("PRISM_THREADS")
+        if threads:  # cap CPU use so the machine stays responsive
+            torch.set_num_threads(max(1, int(threads)))
+        if self.device.startswith("cuda"):
+            torch.backends.cudnn.benchmark = True  # fixed input shapes -> autotuned kernels
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self._omni = self._clip = self._labeler = self._head = None
         self._head_checked = False
 

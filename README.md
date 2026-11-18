@@ -34,7 +34,7 @@ than 26.8 s, 15 % is under 4 s, so one 4.02 s segment is emitted and the soft pe
 | `code/tools/` | downloads, batch runner, validator, local scorer, training |
 | `configs/submission.json` | overrides for the submission (at least `team_id`) |
 | `package/` | the organisers' student package (manifest, vocabulary, examples) |
-| `tests/` | `python -m pytest -q tests/`: 18 tests, no weights or data needed |
+| `tests/` | `python -m pytest -q tests/`: 19 tests, no weights or data needed |
 
 ## 1. Set up (RTX 3060 PC)
 
@@ -65,16 +65,30 @@ python code/tools/check_videos.py          # all present and within ±0.5 s of t
 ## 3. Produce the 187 outputs
 
 ```bash
-python code/tools/run_all.py --videos data            # caches features in cache/features/
-python code/tools/validate.py --dir outputs/          # must print "0 problem(s)"
-python code/tools/evaluate.py --pred outputs/         # local estimate of all four metrics
+python code/tools/run_all.py --videos data --workers 2   # 2 processes share the GPU; features cached
+python code/tools/validate.py --dir outputs/             # must print "0 problem(s)"
+python code/tools/evaluate.py --pred outputs/            # local estimate of all four metrics
 ```
 
-`run_all.py` uses the same `Pipeline` as `run.sh` but loads the models only once. It is resumable,
-and `--shard 0/2` / `--shard 1/2` splits the work across two processes. Decoding 1080p60
-video is usually the bottleneck. `"hwaccel": "cuda"` in the config makes ffmpeg decode on the GPU
-(NVDEC), if your ffmpeg build supports it. After changing thresholds or training a head,
-`run_all.py --from-cache --overwrite` rebuilds every JSON in a few minutes without decoding again.
+`run_all.py` uses the same `Pipeline` as `run.sh` but loads the models only once per worker.
+It is resumable and processes the longest videos first.
+After you change thresholds or train a head, `run_all.py --from-cache --overwrite` rebuilds every
+JSON in a few minutes without decoding again.
+
+### Speed and keeping the PC usable
+
+| knob | default | effect |
+|---|---|---|
+| `--workers N` (run_all) | 1 | N processes sharing the GPU. Decode on one overlaps inference on another. Use 2 on a 12 GB card. |
+| `hwaccel` (config) | `auto` | ffmpeg decodes on the GPU (NVDEC) when the build supports it, otherwise falls back to CPU per file. |
+| `batch_size` (config) | `0` = auto | Omnivore windows per pass, sized from VRAM ÷ workers (~1.2 GB per window in fp16). CUDA out-of-memory halves the batch and retries. |
+| `JOBS` (download_epic.sh) | 4 | parallel EPIC downloads |
+| `--jobs` (download_fpvsum.py) | 4 | parallel YouTube downloads |
+| `--download-jobs` (build_train_features.py) | 3 | parallel train downloads; `--prefetch` caps how many videos sit on disk |
+| `code/tools/gentle.sh <cmd>` | | runs any command at lowest CPU/IO priority with a RAM cap (`MEM=5G`) and a thread cap (`THREADS=4`). Only that command can be OOM-killed, never your browser. |
+
+Memory facts (measured): Omnivore needs ~2.6 GB of RAM for one window in fp32 on CPU, plus ~1.45 GB
+for each extra window in a batch. CLIP-L adds ~1.7 GB. On CPU, always run through `gentle.sh`.
 
 **Do not tune on `evaluate.py`.** The EPIC validation split and the FPVSum annotations are the
 hidden test set. Use it as a sanity check only, and tune on held-out *train* videos

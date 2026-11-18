@@ -69,6 +69,30 @@ def probe(path: str) -> VideoInfo:
     return VideoInfo(path, dur, fps, int(st.get("width", 0)), int(st.get("height", 0)))
 
 
+class _NoFrames(RuntimeError):
+    pass
+
+
+_HW_CACHE: dict[str, str] = {}
+
+
+def resolve_hwaccel(want: str) -> str:
+    """"" -> software; "auto" -> cuda if this ffmpeg build and an NVIDIA GPU support it."""
+    if want != "auto":
+        return want
+    if "auto" not in _HW_CACHE:
+        ok = ""
+        try:
+            out = subprocess.run([_ffbin("ffmpeg"), "-hide_banner", "-hwaccels"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            if "cuda" in out.split() and shutil.which("nvidia-smi"):
+                ok = "cuda"
+        except Exception:  # noqa: BLE001
+            pass
+        _HW_CACHE["auto"] = ok
+    return _HW_CACHE["auto"]
+
+
 class FrameStream:
     """Iterate ``(index, HxWx3 uint8)`` frames sampled at a fixed rate.
 
@@ -81,17 +105,29 @@ class FrameStream:
         self.path, self.fps, self.size = path, fps, size
         vf = (f"fps={fps},scale=w={size}:h={size}:force_original_aspect_ratio=increase:"
               f"flags=bilinear,crop={size}:{size}")
+        self._vf, self._threads = vf, threads
+        self.hwaccel = resolve_hwaccel(hwaccel)
+        self._prefetch = prefetch
+
+    def _cmd(self, hwaccel: str) -> list[str]:
         cmd = [_ffbin("ffmpeg"), "-nostdin", "-v", "error"]
         if hwaccel:
             cmd += ["-hwaccel", hwaccel]
-        cmd += ["-threads", str(threads), "-i", path, "-an", "-sn", "-dn", "-vf", vf,
-                "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
-        self._cmd = cmd
-        self._prefetch = prefetch
+        return cmd + ["-threads", str(self._threads), "-i", self.path, "-an", "-sn", "-dn",
+                      "-vf", self._vf, "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
 
     def __iter__(self):
+        if self.hwaccel:
+            try:
+                yield from self._iter(self.hwaccel)
+                return
+            except _NoFrames:
+                pass  # hardware decode unsupported for this file -> software
+        yield from self._iter("")
+
+    def _iter(self, hwaccel: str):
         nbytes = self.size * self.size * 3
-        proc = subprocess.Popen(self._cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(self._cmd(hwaccel), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 bufsize=nbytes * 4)
         q: queue.Queue = queue.Queue(maxsize=self._prefetch)
         sentinel = object()
@@ -123,6 +159,8 @@ class FrameStream:
             th.join(timeout=5)
             err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
             if idx == 0:
+                if hwaccel:
+                    raise _NoFrames(err)
                 raise RuntimeError(f"ffmpeg produced no frames for {self.path}: {err[-2000:]}")
 
 
@@ -134,8 +172,6 @@ def keyframes(path: str, size: int = 224, max_frames: int = 48, hwaccel: str = "
     vf = (f"scale=w={size}:h={size}:force_original_aspect_ratio=increase:flags=bilinear,"
           f"crop={size}:{size}")
     cmd = [_ffbin("ffmpeg"), "-nostdin", "-v", "error"]
-    if hwaccel:
-        cmd += ["-hwaccel", hwaccel]
     cmd += ["-skip_frame", "nokey", "-i", path, "-an", "-sn", "-dn", "-fps_mode", "passthrough",
             "-vf", vf, "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
     res = subprocess.run(cmd, capture_output=True, check=False)

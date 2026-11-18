@@ -3,6 +3,7 @@
 #   code/tools/download_epic.sh                 # the 138 manifest (validation) videos, ~184 GB
 #   code/tools/download_epic.sh P01_01,P01_02   # specific ids
 #   OUT=/mnt/big/EPIC code/tools/download_epic.sh   # custom location
+#   JOBS=6 code/tools/download_epic.sh              # parallel downloads (default 4)
 # Files land in $OUT/EPIC-KITCHENS/<participant>/videos/<id>.MP4
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,6 +23,21 @@ for id in "${ALL[@]}"; do
   if [ -s "$f" ]; then echo "have $id"; else TODO+=("$id"); fi
 done
 if [ "${#TODO[@]}" -eq 0 ]; then echo "all present"; exit 0; fi
-echo "downloading ${#TODO[@]} video(s) to $OUT/EPIC-KITCHENS"
+JOBS="${JOBS:-4}"
+echo "downloading ${#TODO[@]} video(s) to $OUT/EPIC-KITCHENS with $JOBS parallel jobs"
 cd "$EXT/epic-kitchens-download-scripts"
-python3 epic_downloader.py --videos --specific-videos "$(IFS=,; echo "${TODO[*]}")" --output-path "$OUT"
+mkdir -p "$OUT/logs"
+pids=()
+for ((j = 0; j < JOBS; j++)); do
+  part=()
+  for ((k = j; k < ${#TODO[@]}; k += JOBS)); do part+=("${TODO[$k]}"); done
+  [ "${#part[@]}" -eq 0 ] && continue
+  python3 epic_downloader.py --videos --specific-videos "$(IFS=,; echo "${part[*]}")" \
+    --output-path "$OUT" > "$OUT/logs/epic_download_$j.log" 2>&1 &
+  pids+=($!)
+  echo "job $j: ${#part[@]} videos, log $OUT/logs/epic_download_$j.log"
+done
+fail=0
+for p in "${pids[@]}"; do wait "$p" || fail=1; done
+echo "finished (exit $fail). Verify with: python code/tools/check_videos.py"
+exit $fail
