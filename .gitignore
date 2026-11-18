@@ -1,0 +1,15 @@
+# large / regenerable
+.venv/
+weights/*
+!weights/README.md
+data/
+cache/
+ext/
+outputs/*.tmp
+*.part
+__pycache__/
+.pytest_cache/
+*.pyc
+# never commit ground truth (integrity scans)
+*gt_data.mat
+EPIC_100_validation.csv
